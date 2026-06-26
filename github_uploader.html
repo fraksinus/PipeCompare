@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PipeCompare - GitHub Exporter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-app: #090d16;
+      --bg-card: rgba(21, 30, 51, 0.7);
+      --border-color: rgba(43, 62, 102, 0.5);
+      --color-primary: #3b82f6;
+      --color-success: #10b981;
+      --color-danger: #ef4444;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --font-family: 'Outfit', sans-serif;
+    }
+    body {
+      background-color: var(--bg-app);
+      color: var(--text-main);
+      font-family: var(--font-family);
+      margin: 0;
+      padding: 2rem;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .uploader-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 2.5rem;
+      width: 100%;
+      max-width: 600px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #fff 30%, var(--color-primary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 2rem;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 1.25rem;
+    }
+    label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    input[type="text"], input[type="password"] {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      color: var(--text-main);
+      font-family: var(--font-family);
+      font-size: 0.9rem;
+      outline: none;
+      transition: all 0.2s;
+    }
+    input:focus {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 10px rgba(59, 130, 246, 0.3);
+    }
+    .file-drop-zone {
+      border: 2px dashed var(--border-color);
+      border-radius: 8px;
+      padding: 2rem;
+      text-align: center;
+      cursor: pointer;
+      background: rgba(15, 23, 42, 0.3);
+      transition: all 0.2s;
+      margin-bottom: 1.5rem;
+    }
+    .file-drop-zone:hover {
+      border-color: var(--color-primary);
+      background: rgba(59, 130, 246, 0.05);
+    }
+    .file-list {
+      margin-bottom: 1.5rem;
+      font-size: 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .file-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.5rem 0.75rem;
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+    }
+    .status-badge {
+      font-weight: 600;
+      font-size: 0.75rem;
+    }
+    .status-pending { color: var(--text-muted); }
+    .status-uploading { color: var(--color-primary); }
+    .status-success { color: var(--color-success); }
+    .status-error { color: var(--color-danger); }
+    
+    .btn {
+      width: 100%;
+      background: var(--color-primary);
+      color: white;
+      border: none;
+      padding: 0.85rem;
+      font-family: var(--font-family);
+      font-size: 0.95rem;
+      font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn:hover:not(:disabled) {
+      background: #2563eb;
+      box-shadow: 0 0 15px rgba(59, 130, 246, 0.4);
+    }
+    .btn:disabled {
+      background: var(--border-color);
+      cursor: not-allowed;
+      color: var(--text-muted);
+    }
+    .console-log {
+      margin-top: 1.5rem;
+      background: #05080e;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: monospace;
+      font-size: 0.75rem;
+      max-height: 150px;
+      overflow-y: auto;
+      display: none;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .log-entry {
+      color: #94a3b8;
+    }
+    .log-success { color: #34d399; }
+    .log-error { color: #f87171; }
+    .log-info { color: #60a5fa; }
+  </style>
+</head>
+<body>
+  <div class="uploader-card">
+    <h1>PipeCompare - GitHub Exporter</h1>
+    <div class="subtitle">Upload the project files directly to GitHub using the REST API without terminal or command line commands.</div>
+    
+    <div class="form-group">
+      <label for="githubToken">GitHub Personal Access Token (PAT)</label>
+      <input type="password" id="githubToken" placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxx">
+    </div>
+    
+    <div class="form-group">
+      <label for="repoPath">GitHub Repository Path</label>
+      <input type="text" id="repoPath" value="fraksinus/PipeCompare">
+    </div>
+
+    <div class="form-group">
+      <label>Select Project Files</label>
+      <div class="file-drop-zone" id="dropZone">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="32" height="32" style="color: var(--text-muted); margin-bottom: 0.5rem;">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+        </svg>
+        <div style="font-size: 0.85rem; font-weight: 500;">Click to select or drag & drop files here</div>
+        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">(Select index.html, styles.css, app.js, sample_data.js, .gitignore, ili_log_template.csv)</div>
+        <input type="file" id="fileInput" multiple style="display: none;">
+      </div>
+    </div>
+
+    <div class="file-list" id="fileList"></div>
+
+    <button class="btn" id="uploadBtn" disabled>Upload to GitHub</button>
+
+    <div class="console-log" id="consoleLog"></div>
+  </div>
+
+  <script>
+    const tokenInput = document.getElementById('githubToken');
+    const repoPathInput = document.getElementById('repoPath');
+    const fileInput = document.getElementById('fileInput');
+    const dropZone = document.getElementById('dropZone');
+    const fileListDiv = document.getElementById('fileList');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const consoleLogDiv = document.getElementById('consoleLog');
+
+    let selectedFiles = [];
+
+    // Load token from localStorage
+    if (localStorage.getItem('gh_pat')) {
+      tokenInput.value = localStorage.getItem('gh_pat');
+    }
+
+    tokenInput.addEventListener('input', () => {
+      localStorage.setItem('gh_pat', tokenInput.value);
+      validateInputs();
+    });
+    
+    repoPathInput.addEventListener('input', validateInputs);
+
+    // Dropzone logic
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.style.borderColor = 'var(--color-primary)';
+    });
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.style.borderColor = 'var(--border-color)';
+    });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.style.borderColor = 'var(--border-color)';
+      handleFiles(e.dataTransfer.files);
+    });
+    fileInput.addEventListener('change', () => {
+      handleFiles(fileInput.files);
+    });
+
+    function handleFiles(files) {
+      selectedFiles = Array.from(files);
+      fileListDiv.innerHTML = '';
+      
+      selectedFiles.forEach((file, index) => {
+        const div = document.createElement('div');
+        div.className = 'file-item';
+        div.innerHTML = `
+          <span>${file.name}</span>
+          <span class="status-badge status-pending" id="status-${index}">Pending</span>
+        `;
+        fileListDiv.appendChild(div);
+      });
+
+      validateInputs();
+    }
+
+    function validateInputs() {
+      const hasToken = tokenInput.value.trim().length > 0;
+      const hasRepo = repoPathInput.value.trim().includes('/');
+      const hasFiles = selectedFiles.length > 0;
+      uploadBtn.disabled = !(hasToken && hasRepo && hasFiles);
+    }
+
+    function log(msg, type = 'info') {
+      consoleLogDiv.style.display = 'flex';
+      const div = document.createElement('div');
+      div.className = `log-entry log-${type}`;
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      consoleLogDiv.appendChild(div);
+      consoleLogDiv.scrollTop = consoleLogDiv.scrollHeight;
+    }
+
+    uploadBtn.addEventListener('click', async () => {
+      uploadBtn.disabled = true;
+      consoleLogDiv.innerHTML = '';
+      log('Starting GitHub Upload process...', 'info');
+
+      const token = tokenInput.value.trim();
+      const repoPath = repoPathInput.value.trim();
+      const [owner, repo] = repoPath.split('/');
+
+      try {
+        // 1. Check if repo exists, create if not
+        log(`Checking if repository ${owner}/${repo} exists...`, 'info');
+        const repoCheckRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+          headers: {
+            'Authorization': `token ${token}`,
+            'Accept': 'application/vnd.github+json'
+          }
+        });
+
+        if (repoCheckRes.status === 404) {
+          log(`Repository not found. Creating repository ${repo}...`, 'info');
+          const createRepoRes = await fetch('https://api.github.com/user/repos', {
+            method: 'POST',
+            headers: {
+              'Authorization': `token ${token}`,
+              'Accept': 'application/vnd.github+json',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              name: repo,
+              private: false,
+              description: 'Pipeline ILI Defect Comparison Visualizer'
+            })
+          });
+
+          if (!createRepoRes.ok) {
+            const err = await createRepoRes.json();
+            throw new Error(`Failed to create repository: ${err.message}`);
+          }
+          log('Repository created successfully.', 'success');
+        } else if (!repoCheckRes.ok) {
+          throw new Error(`Invalid credentials or API error. Status: ${repoCheckRes.status}`);
+        } else {
+          log('Repository already exists.', 'success');
+        }
+
+        // 2. Upload files one by one
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const file = selectedFiles[i];
+          const statusBadge = document.getElementById(`status-${i}`);
+          statusBadge.textContent = 'Uploading...';
+          statusBadge.className = 'status-badge status-uploading';
+          log(`Reading and uploading ${file.name}...`, 'info');
+
+          try {
+            // Read file as Base64
+            const base64Content = await getFileBase64(file);
+            
+            // Check if file exists on GitHub to get SHA
+            let existingSha = null;
+            const fileCheckRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file.name}`, {
+              headers: {
+                'Authorization': `token ${token}`,
+                'Accept': 'application/vnd.github+json'
+              }
+            });
+
+            if (fileCheckRes.ok) {
+              const fileData = await fileCheckRes.json();
+              existingSha = fileData.sha;
+              log(`File ${file.name} already exists. SHA resolved: ${existingSha}`, 'info');
+            }
+
+            // Upload/Update file
+            const uploadRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file.name}`, {
+              method: 'PUT',
+              headers: {
+                'Authorization': `token ${token}`,
+                'Accept': 'application/vnd.github+json',
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                message: `Upload ${file.name} via PipeCompare Exporter`,
+                content: base64Content,
+                sha: existingSha
+              })
+            });
+
+            if (!uploadRes.ok) {
+              const err = await uploadRes.json();
+              throw new Error(err.message);
+            }
+
+            statusBadge.textContent = 'Success';
+            statusBadge.className = 'status-badge status-success';
+            log(`Successfully uploaded ${file.name}`, 'success');
+          } catch (fileErr) {
+            statusBadge.textContent = 'Failed';
+            statusBadge.className = 'status-badge status-error';
+            log(`Failed to upload ${file.name}: ${fileErr.message}`, 'error');
+          }
+        }
+
+        log('All files processed!', 'success');
+      } catch (err) {
+        log(`Process aborted: ${err.message}`, 'error');
+      } finally {
+        validateInputs();
+      }
+    });
+
+    function getFileBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => {
+          // Extract base64 part
+          const base64String = reader.result.split(',')[1];
+          resolve(base64String);
+        };
+        reader.onerror = (error) => reject(error);
+      });
+    }
+  </script>
+</body>
+</html>
