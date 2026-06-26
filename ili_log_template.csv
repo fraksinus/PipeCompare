@@ -1,0 +1,10 @@
+Distance (m),Feature Type,Joint ID,Clock Position,Depth (%),Length (mm),Width (mm),Wall Thickness (mm),Joint Length (m),U/S Weld Distance (m)
+-0.16,Weld,GW-0,,,,,12.7,0.16,
+0.00,Flange,GW-0,12:00,,,,12.7,11.5,
+0.15,Weld,GW-1,,,,,12.7,1.60,
+0.43,Bend,GW-1,06:00,,,,17.5,1.60,
+1.74,Weld,GW-2,,,,,17.5,0.60,
+5.30,Defect,GW-5,05:02,23.0,172,196,17.5,0.50,0.52
+5.50,Defect,GW-5,05:20,9.0,108,63,17.5,0.50,0.72
+5.53,Defect,GW-5,06:48,8.0,14,8,17.5,0.50,0.75
+5.64,Weld,GW-6,,,,,17.5,1.40,
