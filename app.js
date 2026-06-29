@@ -38,6 +38,7 @@
     weldMatches: [],           // [{idxPrev, idxLat, type: 'match'|'skip_prev'|'skip_lat'}]
     alignedPrevDefects: [],    // previous defects with distance mapped to Latest coordinates
     alignedPrevLandmarks: [],  // previous landmarks with distance mapped to Latest coordinates
+    alignedPrevWelds: [],      // previous welds with distance mapped to Latest coordinates
     matchedDefects: [],        // [{prev, lat, growth, spatialDist, status: 'matched'}]
     unmatchedPrev: [],         // defects in Prev not matched to Lat (repaired)
     unmatchedLat: [],          // defects in Lat not matched to Prev (new)
@@ -51,7 +52,14 @@
     selectedDefectId: null,    // Selected defect ID for highlight
     colorMode: 'depth',        // 'depth', 'growth', 'status'
     showWelds: true,
-    showLinks: true
+    showLinks: true,
+    defectCurrentPage: 1,      // Current page for defects table
+    weldCurrentPage: 1,        // Current page for welds table
+    pageSize: 50,              // Number of rows per page
+    shouldJumpToPage: false,   // Flag to trigger auto page-jump when focusing a defect
+    depthWeight: 0.01,         // Depth Influence Coefficient (m/%)
+    weldDistWeight: 1.0,       // U/S Weld Distance Influence Weight (dimensionless multiplier)
+    needsRecalculate: false    // Track if alignment parameters are out-of-sync
   };
 
   // DOM Elements
@@ -76,6 +84,7 @@
     btnLoadDemo: document.getElementById('btnLoadDemo'),
     btnReset: document.getElementById('btnReset'),
     btnDownloadTemplate: document.getElementById('btnDownloadTemplate'),
+    btnThemeToggle: document.getElementById('btnThemeToggle'),
     
     statMatched: document.getElementById('statMatched'),
     statNew: document.getElementById('statNew'),
@@ -93,6 +102,7 @@
     canvasPrev: document.getElementById('canvasPrev'),
     canvasLat: document.getElementById('canvasLat'),
     canvasMinimap: document.getElementById('canvasMinimap'),
+    zoomLevelDisplay: document.getElementById('zoomLevelDisplay'),
     
     tableSearch: document.getElementById('tableSearch'),
     filterStatus: document.getElementById('filterStatus'),
@@ -120,6 +130,9 @@
     
     floatTooltip: document.getElementById('floatTooltip'),
     testRunnerBadge: document.getElementById('testRunnerBadge'),
+    inputDepthWeight: document.getElementById('inputDepthWeight'),
+    inputWeldDistWeight: document.getElementById('inputWeldDistWeight'),
+    btnRecalculate: document.getElementById('btnRecalculate'),
 
     // Tabs & Weld table selectors
     tabDefects: document.getElementById('tabDefects'),
@@ -138,6 +151,7 @@
 
   // Initialize App
   function init() {
+    initTheme();
     setupEventListeners();
     setupCanvasContexts();
     updatePipelineCircumferenceLabel();
@@ -205,6 +219,25 @@
   function getClockRatioDiff(r1, r2) {
     const d = Math.abs(r1 - r2);
     return Math.min(d, 1 - d);
+  }
+
+  // Binary search helper to find the index of the first element in a sorted array where keySelector(element) >= targetValue
+  function binarySearchFirstIndex(array, keySelector, targetValue) {
+    let low = 0;
+    let high = array.length - 1;
+    let result = array.length;
+
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const val = keySelector(array[mid]);
+      if (val >= targetValue) {
+        result = mid;
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return result;
   }
 
   // Helper to calculate and fill joint lengths for a list of welds
@@ -452,7 +485,11 @@
         if (dX <= state.matchDistance && clockDiffMin <= state.matchClock) {
           // Spatial 2D Distance
           const dist2D = Math.sqrt(dX * dX + dY * dY);
-          pairs.push({ prevIdx: i, latIdx: j, dist: dist2D, p, l });
+          // Composite Score (incorporating depth consistency & local girth weld distance similarity)
+          const depthDiff = Math.abs(p.depth - l.depth);
+          const weldDistDiff = Math.abs(p.usWeldDist - l.usWeldDist);
+          const compositeScore = dist2D + (state.depthWeight * depthDiff) + (state.weldDistWeight * weldDistDiff);
+          pairs.push({ prevIdx: i, latIdx: j, dist: compositeScore, p, l });
         }
       }
     }
@@ -487,6 +524,20 @@
     const finalUnmatchedL = unmatchedL.filter((_, idx) => !latMatchedFlags[idx]);
 
     return { matched, unmatchedPrev: finalUnmatchedP, unmatchedLat: finalUnmatchedL };
+  }
+
+  function markOutOfSync() {
+    state.needsRecalculate = true;
+    if (state.prevDefects.length > 0 && state.latDefects.length > 0) {
+      els.btnRecalculate.classList.add('btn-warning-pulse');
+      els.btnRecalculate.disabled = false;
+      els.btnRecalculate.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right: 0.25rem;">
+          <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+        </svg>
+        Recalculate Alignment *
+      `;
+    }
   }
 
   // --- Process & Align Uploaded/Generated Data ---
@@ -528,6 +579,27 @@
       };
     });
 
+    // 2c. Perform Stretch-and-Squeeze on Previous Welds
+    state.alignedPrevWelds = state.prevWelds.map(weld => {
+      const match = state.weldMatches.find(m => m.type === 'match' && m.idxPrev === state.prevWelds.indexOf(weld));
+      let alignedD;
+      if (match) {
+        alignedD = state.latWelds[match.idxLat].distance;
+      } else {
+        alignedD = mapPrevDistanceToLat(
+          weld.distance,
+          state.prevWelds,
+          state.latWelds,
+          state.weldMatches,
+          state.scaleFactor
+        );
+      }
+      return {
+        ...weld,
+        alignedDistance: parseFloat(alignedD.toFixed(3))
+      };
+    });
+
     // 3. Compute Upstream Weld Distances for all datasets
     computeUsWeldDistances('prev');
     computeUsWeldDistances('lat');
@@ -551,6 +623,7 @@
     // 4. Match Defects between runs
     const matchResult = matchDefects(state.alignedPrevDefects, state.latDefects);
     state.matchedDefects = matchResult.matched;
+    state.matchedDefects.sort((a, b) => a.lat.distance - b.lat.distance); // Sort by latest distance for optimized binary search rendering!
     state.unmatchedPrev = matchResult.unmatchedPrev;
     state.unmatchedLat = matchResult.unmatchedLat;
 
@@ -566,6 +639,19 @@
     renderAll();
     fillComparisonTable();
     fillWeldAlignmentTable();
+
+    // Reset recalculate button state
+    state.needsRecalculate = false;
+    if (els.btnRecalculate) {
+      els.btnRecalculate.classList.remove('btn-warning-pulse');
+      els.btnRecalculate.disabled = !(state.prevDefects.length > 0 && state.latDefects.length > 0);
+      els.btnRecalculate.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right: 0.25rem;">
+          <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+        </svg>
+        Recalculate Alignment
+      `;
+    }
   }
 
   // Calculates or reads distance to upstream girth weld for each defect
@@ -1018,6 +1104,11 @@
   function renderAll() {
     if (!ctxPrev || !ctxLat || !ctxMinimap) return;
 
+    if (els.zoomLevelDisplay) {
+      const zoomPercent = Math.round((state.zoom / 15) * 100);
+      els.zoomLevelDisplay.textContent = `${zoomPercent}%`;
+    }
+
     renderUnrolledChart(ctxPrev, els.canvasPrev, 'prev');
     renderUnrolledChart(ctxLat, els.canvasLat, 'lat');
     renderMinimap(ctxMinimap, els.canvasMinimap);
@@ -1062,18 +1153,19 @@
     const H = canvas.height;
     ctx.clearRect(0, 0, W, H);
 
-    const welds = runType === 'prev' ? state.prevWelds : state.latWelds;
+    const welds = runType === 'prev' ? (state.alignedPrevWelds.length > 0 ? state.alignedPrevWelds : state.prevWelds) : state.latWelds;
     const defects = runType === 'prev' ? state.alignedPrevDefects : state.latDefects;
     const isPrev = runType === 'prev';
+    const isLight = isLightTheme(); // Cached once to avoid layout thrashing inside tight loops
 
     // Map screen bounds to distances
     const startM = state.panOffset;
     const endM = startM + (W / state.zoom);
 
     // --- 1. Draw Grid Lines ---
-    ctx.strokeStyle = 'rgba(43, 62, 102, 0.25)';
+    ctx.strokeStyle = isLight ? 'rgba(15, 23, 42, 0.08)' : 'rgba(43, 62, 102, 0.25)';
     ctx.lineWidth = 1;
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.6)';
+    ctx.fillStyle = isLight ? 'rgba(71, 85, 105, 0.8)' : 'rgba(148, 163, 184, 0.6)';
     ctx.font = '10px Outfit';
 
     // Horizontal clock positions grid (every 3 hours: 12:00, 3:00, 6:00, 9:00, 12:00)
@@ -1097,7 +1189,7 @@
     for (let d = firstGrid; d <= endM; d += gridSpacing) {
       const x = (d - startM) * state.zoom;
       ctx.beginPath();
-      ctx.strokeStyle = 'rgba(43, 62, 102, 0.15)';
+      ctx.strokeStyle = isLight ? 'rgba(15, 23, 42, 0.06)' : 'rgba(43, 62, 102, 0.15)';
       ctx.moveTo(x, 0);
       ctx.lineTo(x, H);
       ctx.stroke();
@@ -1106,11 +1198,14 @@
 
     // --- 2. Draw Girth Welds ---
     if (state.showWelds) {
-      welds.forEach((weld, wIdx) => {
-        if (weld.distance < startM - 20 || weld.distance > endM + 20) return;
+      const startIdx = binarySearchFirstIndex(welds, w => (isPrev && w.alignedDistance !== undefined) ? w.alignedDistance : w.distance, startM - 20);
+      for (let i = startIdx; i < welds.length; i++) {
+        const weld = welds[i];
+        const currentDist = (isPrev && weld.alignedDistance !== undefined) ? weld.alignedDistance : weld.distance;
+        if (currentDist > endM + 20) break;
 
-        const x = (weld.distance - startM) * state.zoom;
-        ctx.strokeStyle = 'rgba(71, 85, 105, 0.6)';
+        const x = (currentDist - startM) * state.zoom;
+        ctx.strokeStyle = isLight ? 'rgba(100, 116, 139, 0.8)' : 'rgba(71, 85, 105, 0.6)';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(x, 15);
@@ -1121,21 +1216,23 @@
         ctx.save();
         ctx.translate(x - 4, H - 30);
         ctx.rotate(-Math.PI / 2);
-        ctx.fillStyle = 'rgba(148, 163, 184, 0.8)';
+        ctx.fillStyle = isLight ? 'rgba(30, 41, 59, 0.9)' : 'rgba(148, 163, 184, 0.8)';
         let label = weld.id;
         if (weld.jointLength) {
           label += ` (L: ${weld.jointLength.toFixed(1)}m)`;
         }
         ctx.fillText(label, 0, 0);
         ctx.restore();
-      });
+      }
     }
 
     // --- 2b. Draw Reference Landmarks (e.g. Bends, Valves, Tees) ---
     const landmarks = runType === 'prev' ? state.alignedPrevLandmarks : state.latLandmarks;
-    landmarks.forEach(lm => {
+    const startLmIdx = binarySearchFirstIndex(landmarks, lm => isPrev ? lm.alignedDistance : lm.distance, startM - 20);
+    for (let i = startLmIdx; i < landmarks.length; i++) {
+      const lm = landmarks[i];
       const currentDist = isPrev ? lm.alignedDistance : lm.distance;
-      if (currentDist < startM - 20 || currentDist > endM + 20) return;
+      if (currentDist > endM + 20) break;
 
       const x = (currentDist - startM) * state.zoom;
       
@@ -1157,12 +1254,14 @@
       ctx.font = 'bold 9px Outfit';
       ctx.fillText(`${lm.type} ${lm.label ? '(' + lm.label + ')' : ''}`, 0, 0);
       ctx.restore();
-    });
+    }
 
     // --- 3. Draw Defects ---
-    defects.forEach(def => {
+    const startDefIdx = binarySearchFirstIndex(defects, def => isPrev ? def.alignedDistance : def.distance, startM - 20);
+    for (let i = startDefIdx; i < defects.length; i++) {
+      const def = defects[i];
       const currentDist = isPrev ? def.alignedDistance : def.distance;
-      if (currentDist < startM - 20 || currentDist > endM + 20) return;
+      if (currentDist > endM + 20) break;
 
       const x = (currentDist - startM) * state.zoom;
       const y = def.clockRatio * (H - 30) + 15;
@@ -1204,17 +1303,21 @@
       }
 
       ctx.restore();
-    });
+    }
 
     // --- 4. Draw Match Link connection lines (only on Latest Run canvas) ---
     if (!isPrev && state.showLinks && state.matchedDefects.length > 0) {
-      state.matchedDefects.forEach(pair => {
+      const startMatchIdx = binarySearchFirstIndex(state.matchedDefects, pair => pair.lat.distance, startM - 20);
+      for (let i = startMatchIdx; i < state.matchedDefects.length; i++) {
+        const pair = state.matchedDefects[i];
+        if (pair.lat.distance > endM + 20) break;
+
         const prevDistAligned = pair.prev.alignedDistance;
         const latDist = pair.lat.distance;
 
         // Skip if outside viewport
-        if (latDist < startM - 20 && prevDistAligned < startM - 20) return;
-        if (latDist > endM + 20 && prevDistAligned > endM + 20) return;
+        if (latDist < startM - 20 && prevDistAligned < startM - 20) continue;
+        if (latDist > endM + 20 && prevDistAligned > endM + 20) continue;
 
         const xPrev = (prevDistAligned - startM) * state.zoom;
         const yPrev = pair.prev.clockRatio * (H - 30) + 15;
@@ -1231,7 +1334,7 @@
         ctx.lineTo(xLat, yLat);
         ctx.stroke();
         ctx.setLineDash([]);
-      });
+      }
     }
 
     // --- 5. Draw Sync Dotted Hover Cursor ---
@@ -1263,11 +1366,12 @@
     const W = canvas.width;
     const H = canvas.height;
     ctx.clearRect(0, 0, W, H);
+    const isLight = isLightTheme(); // Cached once to avoid layout thrashing inside tight loops
 
     // Draw background pipeline bar
-    ctx.fillStyle = '#090d16';
+    ctx.fillStyle = isLight ? '#e2e8f0' : '#090d16';
     ctx.fillRect(0, 10, W, H - 20);
-    ctx.strokeStyle = 'rgba(43, 62, 102, 0.4)';
+    ctx.strokeStyle = isLight ? '#cbd5e1' : 'rgba(43, 62, 102, 0.4)';
     ctx.strokeRect(0, 10, W, H - 20);
 
     // Draw defects density
@@ -1288,7 +1392,7 @@
     const boxX = viewLeftRatio * W;
     const boxW = Math.max(viewWidthRatio * W, 10);
 
-    ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
+    ctx.fillStyle = isLight ? 'rgba(37, 99, 235, 0.08)' : 'rgba(59, 130, 246, 0.15)';
     ctx.strokeStyle = '#3b82f6';
     ctx.lineWidth = 2;
     ctx.fillRect(boxX, 10, boxW, H - 20);
@@ -1366,27 +1470,57 @@
       return d1 - d2;
     });
 
-    // Filter & render
-    let renderedCount = 0;
-    rows.forEach(r => {
+    // Filter rows
+    const filteredRows = rows.filter(r => {
       // Search filter
       const matchesSearch = 
         r.jointId.toLowerCase().includes(searchVal) || 
         (r.rawPair && (r.rawPair.prev.id.toLowerCase().includes(searchVal) || r.rawPair.lat.id.toLowerCase().includes(searchVal))) ||
-        (r.rawDefect && r.rawDefect.id.toLowerCase().includes(searchVal));
+        (r.rawDefect && r.rawDefect.id.toLowerCase().includes(searchVal)) ||
+        (r.distPrev !== null && r.distPrev.toFixed(2).includes(searchVal)) ||
+        (r.distLat !== null && r.distLat.toFixed(2).includes(searchVal));
 
-      if (!matchesSearch) return;
+      if (!matchesSearch) return false;
 
       // Status filter
-      if (filterVal === 'matched' && r.status !== 'matched') return;
-      if (filterVal === 'new' && r.status !== 'new') return;
-      if (filterVal === 'repaired' && r.status !== 'repaired') return;
+      if (filterVal === 'matched' && r.status !== 'matched') return false;
+      if (filterVal === 'new' && r.status !== 'new') return false;
+      if (filterVal === 'repaired' && r.status !== 'repaired') return false;
       if (filterVal === 'critical') {
         const isCrit = (r.depthLat !== null && r.depthLat >= 40) || (r.rawPair && r.rawPair.prev.depth >= 40);
-        if (!isCrit) return;
+        if (!isCrit) return false;
       }
+      return true;
+    });
 
-      renderedCount++;
+    // Auto page-jumping when a row is selected/focused from canvas
+    if (state.selectedDefectId && state.shouldJumpToPage) {
+      const idx = filteredRows.findIndex(r => {
+        const id = r.rawPair ? r.rawPair.lat.id : r.rawDefect.id;
+        return id === state.selectedDefectId;
+      });
+      if (idx !== -1) {
+        state.defectCurrentPage = Math.floor(idx / state.pageSize) + 1;
+      }
+      state.shouldJumpToPage = false; // Reset flag so manual paging is not overridden
+    }
+
+    const totalItems = filteredRows.length;
+    const totalPages = Math.ceil(totalItems / state.pageSize) || 1;
+    if (state.defectCurrentPage > totalPages) {
+      state.defectCurrentPage = totalPages;
+    }
+    if (state.defectCurrentPage < 1) {
+      state.defectCurrentPage = 1;
+    }
+
+    // Slice for pagination
+    const startIndex = (state.defectCurrentPage - 1) * state.pageSize;
+    const endIndex = Math.min(startIndex + state.pageSize, totalItems);
+    const pageRows = filteredRows.slice(startIndex, endIndex);
+
+    // Render paginated items
+    pageRows.forEach(r => {
       const tr = document.createElement('tr');
       
       // Highlight matching row selection
@@ -1442,12 +1576,22 @@
       els.defectTableBody.appendChild(tr);
     });
 
-    if (renderedCount === 0) {
+    if (totalItems === 0) {
       els.defectTableBody.innerHTML = `
         <tr>
           <td colspan="9" class="empty-table-msg">No defects matching current filters.</td>
         </tr>
       `;
+    }
+
+    // Update pagination controls
+    const btnPrev = document.getElementById('btnDefectPrev');
+    const btnNext = document.getElementById('btnDefectNext');
+    const pageInfo = document.getElementById('defectPageInfo');
+    if (btnPrev && btnNext && pageInfo) {
+      btnPrev.disabled = state.defectCurrentPage <= 1;
+      btnNext.disabled = state.defectCurrentPage >= totalPages;
+      pageInfo.textContent = `Page ${state.defectCurrentPage} of ${totalPages} (Total: ${totalItems})`;
     }
   }
 
@@ -1527,21 +1671,40 @@
       return d1 - d2;
     });
 
-    let renderedCount = 0;
-    rows.forEach(r => {
+    // Filter rows
+    const filteredRows = rows.filter(r => {
       // Search filter
       const matchesSearch = 
         r.prevId.toLowerCase().includes(searchVal) || 
-        r.latId.toLowerCase().includes(searchVal);
+        r.latId.toLowerCase().includes(searchVal) ||
+        (r.prevDist !== null && r.prevDist.toFixed(2).includes(searchVal)) ||
+        (r.latDist !== null && r.latDist.toFixed(2).includes(searchVal));
 
-      if (!matchesSearch) return;
+      if (!matchesSearch) return false;
 
       // Status filter
-      if (filterVal === 'matched' && r.status !== 'matched') return;
-      if (filterVal === 'skipped_prev' && r.status !== 'skipped_prev') return;
-      if (filterVal === 'skipped_lat' && r.status !== 'skipped_lat') return;
+      if (filterVal === 'matched' && r.status !== 'matched') return false;
+      if (filterVal === 'skipped_prev' && r.status !== 'skipped_prev') return false;
+      if (filterVal === 'skipped_lat' && r.status !== 'skipped_lat') return false;
 
-      renderedCount++;
+      return true;
+    });
+
+    const totalItems = filteredRows.length;
+    const totalPages = Math.ceil(totalItems / state.pageSize) || 1;
+    if (state.weldCurrentPage > totalPages) {
+      state.weldCurrentPage = totalPages;
+    }
+    if (state.weldCurrentPage < 1) {
+      state.weldCurrentPage = 1;
+    }
+
+    // Slice for pagination
+    const startIndex = (state.weldCurrentPage - 1) * state.pageSize;
+    const endIndex = Math.min(startIndex + state.pageSize, totalItems);
+    const pageRows = filteredRows.slice(startIndex, endIndex);
+
+    pageRows.forEach(r => {
       const tr = document.createElement('tr');
 
       // Status badge
@@ -1586,17 +1749,28 @@
       els.weldTableBody.appendChild(tr);
     });
 
-    if (renderedCount === 0) {
+    if (totalItems === 0) {
       els.weldTableBody.innerHTML = `
         <tr>
           <td colspan="9" class="empty-table-msg">No welds matching current filters.</td>
         </tr>
       `;
     }
+
+    // Update pagination controls
+    const btnPrev = document.getElementById('btnWeldPrev');
+    const btnNext = document.getElementById('btnWeldNext');
+    const pageInfo = document.getElementById('weldPageInfo');
+    if (btnPrev && btnNext && pageInfo) {
+      btnPrev.disabled = state.weldCurrentPage <= 1;
+      btnNext.disabled = state.weldCurrentPage >= totalPages;
+      pageInfo.textContent = `Page ${state.weldCurrentPage} of ${totalPages} (Total: ${totalItems})`;
+    }
   }
 
   function setSelectedDefect(defectId) {
     state.selectedDefectId = defectId;
+    state.shouldJumpToPage = true; // Set flag to trigger table page-jump to this defect
     
     // Find defect distance to pan to
     let dist = null;
@@ -1645,7 +1819,7 @@
     // Check for defect hit
     const defects = runType === 'prev' ? state.alignedPrevDefects : state.latDefects;
     let hitDefect = null;
-    const thresholdM = 0.6; // meter threshold
+    const thresholdM = Math.max(0.15, 15 / state.zoom); // 15 pixels hover tolerance, min 0.15m
     const thresholdClock = 0.05; // 5% clock ratio threshold
 
     defects.forEach(def => {
@@ -1790,28 +1964,52 @@
     els.floatTooltip.style.top = `${clientY + 15}px`;
   }
 
+  function zoomAroundAnchor(zoomFactor, anchorM, screenX) {
+    state.zoom = Math.max(2, Math.min(state.zoom * zoomFactor, 100));
+    const newPan = anchorM - (screenX / state.zoom);
+    state.panOffset = Math.max(0, Math.min(state.maxDistance - els.canvasPrev.width / state.zoom, newPan));
+  }
+
   // --- Interaction Event Listeners ---
   function setupEventListeners() {
     // Parameter inputs
-    els.inputOD.addEventListener('change', () => {
+    els.inputOD.addEventListener('change', (e) => {
+      state.diameter = parseFloat(e.target.value) || 762;
       updatePipelineCircumferenceLabel();
       renderAll();
+      markOutOfSync();
     });
-    els.inputWT.addEventListener('change', renderAll);
+    els.inputWT.addEventListener('change', (e) => {
+      state.thickness = parseFloat(e.target.value) || 12.7;
+      renderAll();
+      markOutOfSync();
+    });
     els.inputJointLength.addEventListener('change', (e) => {
       state.nominalJointLength = parseFloat(e.target.value) || 12;
-      processDataAndAlign();
+      markOutOfSync();
     });
     els.inputTolerance.addEventListener('change', (e) => {
       state.tolerance = parseFloat(e.target.value) || 10;
-      processDataAndAlign();
+      markOutOfSync();
     });
     els.inputMatchDist.addEventListener('change', (e) => {
       state.matchDistance = parseFloat(e.target.value) || 1.0;
-      processDataAndAlign();
+      markOutOfSync();
     });
     els.inputMatchClock.addEventListener('change', (e) => {
       state.matchClock = parseFloat(e.target.value) || 60;
+      markOutOfSync();
+    });
+    els.inputDepthWeight.addEventListener('change', (e) => {
+      state.depthWeight = parseFloat(e.target.value) || 0.01;
+      markOutOfSync();
+    });
+    els.inputWeldDistWeight.addEventListener('change', (e) => {
+      state.weldDistWeight = parseFloat(e.target.value) || 1.0;
+      markOutOfSync();
+    });
+
+    els.btnRecalculate.addEventListener('click', () => {
       processDataAndAlign();
     });
 
@@ -1829,11 +2027,17 @@
 
     // Toolbar actions
     els.btnZoomIn.addEventListener('click', () => {
-      state.zoom = Math.min(state.zoom * 1.3, 100);
+      const viewWidth = els.canvasPrev.width / state.zoom;
+      const anchorM = state.hoverDist !== null ? state.hoverDist : (state.panOffset + viewWidth / 2);
+      const screenX = state.hoverDist !== null ? (state.hoverDist - state.panOffset) * state.zoom : (els.canvasPrev.width / 2);
+      zoomAroundAnchor(1.3, anchorM, screenX);
       renderAll();
     });
     els.btnZoomOut.addEventListener('click', () => {
-      state.zoom = Math.max(state.zoom / 1.3, 2);
+      const viewWidth = els.canvasPrev.width / state.zoom;
+      const anchorM = state.hoverDist !== null ? state.hoverDist : (state.panOffset + viewWidth / 2);
+      const screenX = state.hoverDist !== null ? (state.hoverDist - state.panOffset) * state.zoom : (els.canvasPrev.width / 2);
+      zoomAroundAnchor(1 / 1.3, anchorM, screenX);
       renderAll();
     });
     els.btnZoomFit.addEventListener('click', () => {
@@ -1918,18 +2122,51 @@
       // Aligned distance under mouse before zoom
       const prevM = getDistanceForX(mouseX, e.currentTarget.width);
 
-      // Apply zoom
-      state.zoom = Math.max(2, Math.min(state.zoom * zoomFactor, 100));
+      // Apply zoom around mouse pointer
+      zoomAroundAnchor(zoomFactor, prevM, mouseX);
 
-      // Adjust panning offset to keep mouse distance anchored
-      const newM = getDistanceForX(mouseX, e.currentTarget.width);
-      state.panOffset = Math.max(0, state.panOffset + (prevM - newM));
-
-      renderAll();
+      // Re-evaluate hover hit-test at the current mouse position
+      const runType = e.currentTarget.id === 'canvasPrev' ? 'prev' : 'lat';
+      handleCanvasMouseMove(e, runType);
     }
 
     els.canvasPrev.addEventListener('wheel', handleWheelZoom, { passive: false });
     els.canvasLat.addEventListener('wheel', handleWheelZoom, { passive: false });
+
+    // Canvas click selector (distinguishes quick clicks from drags to select defects)
+    function handleCanvasClick(e, runType) {
+      if (Math.abs(e.clientX - dragStartX) > 5) return; // Ignore drag end
+
+      const canvas = runType === 'prev' ? els.canvasPrev : els.canvasLat;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      const clickedDist = getDistanceForX(x, canvas.width);
+      const clickedClockRatio = getClockRatioForY(y, canvas.height);
+
+      const defects = runType === 'prev' ? state.alignedPrevDefects : state.latDefects;
+      let hitDefect = null;
+      const thresholdM = Math.max(0.15, 15 / state.zoom);
+      const thresholdClock = 0.05;
+
+      defects.forEach(def => {
+        const defDist = runType === 'prev' ? def.alignedDistance : def.distance;
+        const dX = Math.abs(clickedDist - defDist);
+        const dY = getClockRatioDiff(clickedClockRatio, def.clockRatio);
+
+        if (dX <= thresholdM && dY <= thresholdClock) {
+          hitDefect = def;
+        }
+      });
+
+      if (hitDefect) {
+        setSelectedDefect(hitDefect.id);
+      }
+    }
+
+    els.canvasPrev.addEventListener('click', (e) => handleCanvasClick(e, 'prev'));
+    els.canvasLat.addEventListener('click', (e) => handleCanvasClick(e, 'lat'));
 
     // Minimap click & drag to scroll
     let isMinimapDragging = false;
@@ -1953,12 +2190,55 @@
     });
 
     // Table Search and Filters
-    els.tableSearch.addEventListener('input', fillComparisonTable);
-    els.filterStatus.addEventListener('change', fillComparisonTable);
+    els.tableSearch.addEventListener('input', () => {
+      state.defectCurrentPage = 1;
+      fillComparisonTable();
+    });
+    els.filterStatus.addEventListener('change', () => {
+      state.defectCurrentPage = 1;
+      fillComparisonTable();
+    });
 
     // Weld Table Search and Filters
-    els.weldSearch.addEventListener('input', fillWeldAlignmentTable);
-    els.filterWeldStatus.addEventListener('change', fillWeldAlignmentTable);
+    els.weldSearch.addEventListener('input', () => {
+      state.weldCurrentPage = 1;
+      fillWeldAlignmentTable();
+    });
+    els.filterWeldStatus.addEventListener('change', () => {
+      state.weldCurrentPage = 1;
+      fillWeldAlignmentTable();
+    });
+
+    // Pagination buttons event listeners
+    const btnDefectPrev = document.getElementById('btnDefectPrev');
+    const btnDefectNext = document.getElementById('btnDefectNext');
+    if (btnDefectPrev && btnDefectNext) {
+      btnDefectPrev.addEventListener('click', () => {
+        if (state.defectCurrentPage > 1) {
+          state.defectCurrentPage--;
+          fillComparisonTable();
+        }
+      });
+      btnDefectNext.addEventListener('click', () => {
+        state.defectCurrentPage++;
+        fillComparisonTable();
+      });
+    }
+
+    const btnWeldPrev = document.getElementById('btnWeldPrev');
+    const btnWeldNext = document.getElementById('btnWeldNext');
+    if (btnWeldPrev && btnWeldNext) {
+      btnWeldPrev.addEventListener('click', () => {
+        if (state.weldCurrentPage > 1) {
+          state.weldCurrentPage--;
+          fillWeldAlignmentTable();
+        }
+      });
+      btnWeldNext.addEventListener('click', () => {
+        state.weldCurrentPage++;
+        fillWeldAlignmentTable();
+      });
+    }
 
     // Focus row action delegation
     els.defectTableBody.addEventListener('click', (e) => {
@@ -2016,6 +2296,43 @@
 
     // Diagnostics / Unit Test runner
     els.testRunnerBadge.addEventListener('click', runDiagnosticsTests);
+
+    // Theme Toggle
+    els.btnThemeToggle.addEventListener('click', toggleTheme);
+  }
+
+  const sunPath = "M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0 M12 2v2 M12 20v2 M4.22 4.22l1.42 1.42 M18.36 18.36l1.42 1.42 M2 12h2 M20 12h2 M4.22 19.78l1.42-1.42 M18.36 5.64l1.42-1.42";
+  const moonPath = "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z";
+
+  function toggleTheme() {
+    const isLight = document.body.classList.toggle('light-theme');
+    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+    updateThemeIcon(isLight);
+    renderAll();
+  }
+
+  function updateThemeIcon(isLight) {
+    const iconPath = document.getElementById('themeIconPath');
+    if (iconPath) {
+      iconPath.setAttribute('d', isLight ? moonPath : sunPath);
+    }
+  }
+
+  function initTheme() {
+    const savedTheme = localStorage.getItem('theme');
+    const systemPrefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+    const isLight = savedTheme === 'light' || (savedTheme === null && systemPrefersLight);
+    
+    if (isLight) {
+      document.body.classList.add('light-theme');
+    } else {
+      document.body.classList.remove('light-theme');
+    }
+    updateThemeIcon(isLight);
+  }
+
+  function isLightTheme() {
+    return document.body.classList.contains('light-theme');
   }
 
   function resetAllData() {
@@ -2030,11 +2347,14 @@
     state.weldMatches = [];
     state.alignedPrevDefects = [];
     state.alignedPrevLandmarks = [];
+    state.alignedPrevWelds = [];
     state.matchedDefects = [];
     state.unmatchedPrev = [];
     state.unmatchedLat = [];
     state.selectedDefectId = null;
     state.panOffset = 0;
+    state.defectCurrentPage = 1;
+    state.weldCurrentPage = 1;
     
     els.namePrev.textContent = 'No file selected';
     els.nameLat.textContent = 'No file selected';
@@ -2060,6 +2380,19 @@
 
     els.weldSearch.value = '';
     els.filterWeldStatus.value = 'all';
+
+    // Reset recalculate button state
+    state.needsRecalculate = false;
+    if (els.btnRecalculate) {
+      els.btnRecalculate.classList.remove('btn-warning-pulse');
+      els.btnRecalculate.disabled = true;
+      els.btnRecalculate.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right: 0.25rem;">
+          <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+        </svg>
+        Recalculate Alignment
+      `;
+    }
   }
 
   function loadDemoData() {
@@ -2226,6 +2559,16 @@
       assert('User scenario: GW-140 should match GW-100', matchedPairsUser[2].idxPrev === 2 && matchedPairsUser[2].idxLat === 2);
       assert('User scenario: GW-160 should match GW-120', matchedPairsUser[3].idxPrev === 3 && matchedPairsUser[3].idxLat === 4);
     }
+
+    // Test 7: Binary Search helper
+    const sortedData = [
+      { d: 5.0 }, { d: 10.0 }, { d: 15.0 }, { d: 20.0 }, { d: 25.0 }
+    ];
+    assert('binarySearchFirstIndex should find element >= 10.0 at index 1', binarySearchFirstIndex(sortedData, x => x.d, 10.0) === 1);
+    assert('binarySearchFirstIndex should find element >= 12.0 at index 2 (15.0)', binarySearchFirstIndex(sortedData, x => x.d, 12.0) === 2);
+    assert('binarySearchFirstIndex should return index 0 for value <= 5.0', binarySearchFirstIndex(sortedData, x => x.d, 2.0) === 0);
+    assert('binarySearchFirstIndex should return length for value > 25.0', binarySearchFirstIndex(sortedData, x => x.d, 30.0) === sortedData.length);
+    assert('binarySearchFirstIndex should handle empty arrays', binarySearchFirstIndex([], x => x.d, 5.0) === 0);
 
     // Print summary
     alert(`Diagnostics Results:\n\n${results.join('\n')}\n\nSummary: ${passed} passed, ${failed} failed.`);
